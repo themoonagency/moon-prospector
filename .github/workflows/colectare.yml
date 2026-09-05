@@ -1,0 +1,24 @@
+name: Colectare firme noi
+
+on:
+  schedule:
+    - cron: "0 5 * * 1-5"   # 08:00 ora Romaniei, luni-vineri
+  workflow_dispatch:
+
+jobs:
+  colecteaza:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Colecteaza si verifica pe Google
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          FIRMEAPI_KEY: ${{ secrets.FIRMEAPI_KEY }}
+        run: |
+          python -m moon.pipeline colectare --tiers "${{ vars.MOON_TIERS || 'A' }}"
+          python -m moon.pipeline sumar

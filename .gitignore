@@ -1,0 +1,15 @@
+# Chei - NU ajung niciodata pe GitHub
+.env
+.streamlit/secrets.toml
+
+# Baza locala si mediul Python
+*.db
+.venv/
+__pycache__/
+*.pyc
+
+# Fisiere de lucru
+test/
+.DS_Store
+.agents/skills/developing-with-streamlit
+.claude/skills/developing-with-streamlit
