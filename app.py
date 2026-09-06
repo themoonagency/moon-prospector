@@ -59,41 +59,10 @@ def _logo_html() -> str:
 
 
 # ---------------------------------------------------------------- acces
-def _poarta() -> None:
-    """Cere parola inainte sa se vada orice. Fara parola configurata, blocheaza.
+# Poarta cu parola + cookie "ramai logat" (vezi moon_auth.py).
+import moon_auth
 
-    Parola sta in MOON_PAROLA: in .env local, in Secrets pe Streamlit Cloud.
-    Aplicatia poate fi publica ca adresa - fara parola nu se vede nimic.
-    """
-    import hmac
-
-    corecta = os.environ.get("MOON_PAROLA", "")
-    if not corecta:
-        st.error("Aplicația nu e configurată: lipsește **MOON_PAROLA** din Secrets.")
-        st.caption("Settings → Secrets → adaugă  MOON_PAROLA = \"...\"  și repornește aplicația.")
-        st.stop()
-
-    if st.session_state.get("acces_permis"):
-        return
-
-    _, mij, _ = st.columns([1, 2, 1])
-    with mij:
-        html = _logo_html()
-        if html:
-            st.markdown(html, unsafe_allow_html=True)
-        st.text_input("Parolă", type="password", key="_parola",
-                      label_visibility="collapsed", placeholder="Parolă")
-        if st.button("Intră", type="primary", width="stretch"):
-            if hmac.compare_digest(st.session_state.get("_parola", ""), corecta):
-                st.session_state["acces_permis"] = True
-                del st.session_state["_parola"]
-                st.rerun()
-            else:
-                st.error("Parolă greșită.")
-    st.stop()
-
-
-_poarta()
+moon_auth.poarta(antet_html=_logo_html())
 
 with st.sidebar:
     html = _logo_html()
@@ -105,8 +74,7 @@ with st.sidebar:
     semnatura = st.text_input("Semnătură", "Felix, THE MOON Agency")
 
     if st.button("Ieși din cont", width="stretch"):
-        st.session_state.clear()
-        st.rerun()
+        moon_auth.iesire()
 
     st.divider()
     st.caption("Verificări active")
