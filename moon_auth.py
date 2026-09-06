@@ -18,7 +18,7 @@ Folosire in app.py:
         moon_auth.iesire()
 
 Secrete (Streamlit: Settings -> Secrets; local: .env):
-    MOON_PAROLA        obligatoriu
+    MOON_PAROLA        obligatoriu (sau APP_PASSWORD, cum e in Labeler)
     MOON_COOKIE_SECRET optional (recomandat pe termen lung)
     MOON_COOKIE_ZILE   optional, implicit 30
 
@@ -55,13 +55,36 @@ def _zile() -> int:
         return 30
 
 
+# Numele sub care sta parola. Prospector foloseste MOON_PAROLA, Labeler APP_PASSWORD.
+NUME_PAROLA = ("MOON_PAROLA", "APP_PASSWORD")
+
+
 def _parola() -> str:
-    return os.environ.get("MOON_PAROLA", "")
+    """Parola din mediu sau din st.secrets, sub oricare dintre numele stiute."""
+    for nume in NUME_PAROLA:
+        v = os.environ.get(nume, "")
+        if v:
+            return v
+    for nume in NUME_PAROLA:
+        try:
+            v = st.secrets.get(nume, "")
+        except Exception:
+            v = ""
+        if v:
+            return str(v)
+    return ""
 
 
 def _secret() -> bytes:
-    s = os.environ.get("MOON_COOKIE_SECRET", "") or ("moon:" + _parola())
-    return hashlib.sha256(s.encode()).digest()
+    s = os.environ.get("MOON_COOKIE_SECRET", "")
+    if not s:
+        try:
+            s = str(st.secrets.get("MOON_COOKIE_SECRET", "") or "")
+        except Exception:
+            s = ""
+    # Fara secret separat: il derivam din parola, deci schimbarea parolei
+    # invalideaza automat toate cookie-urile emise.
+    return hashlib.sha256((s or ("moon:" + _parola())).encode()).digest()
 
 
 def _semneaza(corp: str) -> str:
@@ -127,12 +150,13 @@ def _reinnoieste(ctrl, ramas: int) -> None:
 
 
 # ---------------------------------------------------------------- poarta
-def poarta(antet_html: str = "") -> None:
+def poarta(antet_html: str = "", parola: str | None = None) -> None:
     """Blocheaza aplicatia pana la login. Cu cookie valid, trece direct."""
-    corecta = _parola()
+    corecta = parola if parola is not None else _parola()
     if not corecta:
-        st.error("Aplicația nu e configurată: lipsește **MOON_PAROLA** din Secrets.")
-        st.caption('Settings → Secrets → adaugă  MOON_PAROLA = "..."  și repornește aplicația.')
+        st.error("Aplicația nu e configurată: lipsește parola din Secrets.")
+        st.caption("Settings → Secrets → adaugă  %s = \"...\"  și repornește aplicația."
+                   % NUME_PAROLA[0])
         st.stop()
 
     prima_rulare = _STARE not in st.session_state
