@@ -387,7 +387,8 @@ def compune_followup(prospect: dict, zi: int, semnatura: str = "Felix, THE MOON 
     firma = _curata(prospect.get("denumire", ""))
     s = str(prospect.get("cui", firma))
     variante = _FOLLOWUP_3 if zi <= 4 else _FOLLOWUP_7
-    return f"{_alege(variante, s + str(zi)).format(firma=firma)}\n\n{semnatura}"
+    # _alege da (text, indice) - fara [0] aici crapa tot tabul Follow-up
+    return f"{_alege(variante, s + str(zi))[0].format(firma=firma)}\n\n{semnatura}"
 
 
 def link_whatsapp(telefon: str, mesaj: str) -> str:

@@ -1,5 +1,8 @@
 # Chei - NU ajung niciodata pe GitHub
-.env
+# .env* prinde si copiile de siguranta (.env.bak, .env.backup-...), care altfel
+# raman neignorate si intra intr-un "git add -A" pe un repo PUBLIC
+.env*
+!.env.example
 .streamlit/secrets.toml
 
 # Baza locala si mediul Python

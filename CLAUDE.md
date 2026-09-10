@@ -69,3 +69,19 @@ Tabele: `prospecti`, `blacklist`, `stare`, `jurnal`. Lista albă CAEN e în
 - Mesajele de commit sunt în română.
 - `_to_delete/` (în directorul părinte `~/MOON Prospector/`) e gunoi git rămas dintr-o
   operație eșuată — se poate șterge, nu e parte din proiect.
+
+## Dashboardul e pe Cloudflare, nu pe Streamlit (din 10 sept 2026)
+
+- Interfața nouă: `../prospect-worker` → **prospect.themoonagency.ro** (worker Cloudflare, stilul
+  panoului MOON Chat). `./deploy.sh` din acel folder, rulat de Felix din Terminal.
+- Worker-ul NU rulează Python. Citește din Supabase prin Data API cu cheia `sb_secret_...`
+  (antetul `apikey` DOAR — cheile noi nu sunt JWT-uri, `Authorization: Bearer` le strică).
+- **De aceea mesajele se pre-generează aici, la colectare**: `mesaj_draft`, `mesaj_fu3`,
+  `mesaj_fu7`, cu `{{semnatura}}` ca substituent. Dacă schimbi `mesaj.py`, prospecții vechi
+  rămân cu textul vechi până rulezi `python -m moon.pipeline regenereaza`.
+- Butonul „Colectează acum" din dashboard face `workflow_dispatch` pe `colectare.yml`. Tokenul
+  GitHub din worker (`GITHUB_TOKEN`, fine-grained, doar acest repo, Actions read/write)
+  **expiră pe 9 decembrie 2026** — după data aia butonul dă eroare 401 și trebuie făcut altul.
+  Colectarea programată nu depinde de el.
+- Streamlit (`app.py`) mai merge în paralel, ca rezervă. Dacă adaugi coloane în `db.py`,
+  migrarea rulează doar când pornește Python — worker-ul nu o poate face.

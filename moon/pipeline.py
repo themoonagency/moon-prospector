@@ -14,13 +14,17 @@ import sys
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from . import anaf, contacte, db, firmeapi, onrc, places
+from . import anaf, contacte, db, firmeapi, mesaj, onrc, places
 from .caen import ListaAlba
 from .cui import enumera
 
 # Cat de departe sub cel mai mic CUI vazut mai cautam, ca sa nu ratam
 # inregistrarile care nu au aparut inca pe pagina publica.
 MARJA_INAPOI = 400
+
+# Semnatura ramane substituent in baza de date; interfata o inlocuieste
+# la afisare, ca schimbarea ei sa nu ceara regenerarea mesajelor.
+SEMN = "{{semnatura}}"
 
 
 # ANAF foloseste diacriticele vechi cu sedila (Ş Ţ). Le aducem la forma
@@ -195,7 +199,7 @@ def colectare(tiers: str = "A,B", max_varsta: int = 7, pauza: float = 1.2,
 
             ct = contacte.imbogateste(f.cui) if contacte.activ() else contacte.Contact()
 
-            nou = db.upsert_prospect(con, {
+            rand = {
                 "cui": f.cui,
                 "denumire": f.denumire,
                 "nr_reg_com": f.nr_reg_com,
@@ -220,7 +224,16 @@ def colectare(tiers: str = "A,B", max_varsta: int = 7, pauza: float = 1.2,
                 "recenzii": pz.recenzii,
                 "status": "nou",
                 "data_colectare": acum,
-            })
+            }
+
+            # Mesajele se scriu ACUM, la colectare, ca dashboardul (worker
+            # Cloudflare) sa nu poarte logica din mesaj.py. Semnatura ramane
+            # substituent, ca sa se poata schimba din interfata.
+            rand["mesaj_draft"], rand["varianta_mesaj"] = mesaj.compune(rand, SEMN)
+            rand["mesaj_fu3"] = mesaj.compune_followup(rand, 3, SEMN)
+            rand["mesaj_fu7"] = mesaj.compune_followup(rand, 7, SEMN)
+
+            nou = db.upsert_prospect(con, rand)
             jurnal["adaugate"] += int(nou)
 
         if cui_max:
@@ -260,6 +273,8 @@ def main(argv=None) -> int:
     v.add_argument("--limita", type=int, default=500)
 
     sub.add_parser("sumar", help="cati prospecti sunt si in ce stadiu")
+    sub.add_parser("regenereaza",
+                   help="rescrie mesajele pre-generate pentru prospectii vechi")
     sub.add_parser("statistici", help="rata de raspuns pe nisa, tier si varianta de mesaj")
 
     g = sub.add_parser("test-google", help="verifica cheia Google Places pe o firma reala")
@@ -274,6 +289,28 @@ def main(argv=None) -> int:
         colectare(tiers=a.tiers, max_varsta=a.max_varsta, pauza=a.pauza,
                   doar_mobil=not a.toate_telefoanele,
                   verifica_google=not a.fara_google, sursa=a.sursa)
+    elif a.cmd == "regenereaza":
+        # Prospectii adunati inainte de mutarea dashboardului pe Cloudflare
+        # nu au mesajele scrise in baza. Le scriem acum, o singura data.
+        # initializeaza() adauga intai coloanele noi pe baza existenta.
+        db.initializeaza()
+        with db.conexiune() as con:
+            randuri = db.prospecti(con, limita=100000)
+            n = 0
+            for r in randuri:
+                if r.get("mesaj_draft"):
+                    continue
+                d = dict(r)
+                text, varianta = mesaj.compune(d, SEMN)
+                con.execute(
+                    "UPDATE prospecti SET mesaj_draft=?, mesaj_fu3=?, mesaj_fu7=?, "
+                    "varianta_mesaj=COALESCE(varianta_mesaj,?) WHERE cui=?",
+                    (text, mesaj.compune_followup(d, 3, SEMN),
+                     mesaj.compune_followup(d, 7, SEMN), varianta, r["cui"]))
+                n += 1
+        print(f"{n} prospecti au primit mesajele pre-generate "
+              f"(din {len(randuri)} in total).")
+
     elif a.cmd == "sumar":
         db.initializeaza()
         with db.conexiune() as con:

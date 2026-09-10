@@ -4,6 +4,13 @@ on:
   schedule:
     - cron: "0 5 * * 1-5"   # 08:00 ora Romaniei, luni-vineri
   workflow_dispatch:
+    inputs:
+      tiers:
+        description: "Tier-uri, despartite prin virgula (A, A,B, A,B,C)"
+        default: "A"
+      max_varsta:
+        description: "Vechime maxima a firmelor, in zile"
+        default: "7"
 
 jobs:
   colecteaza:
@@ -20,5 +27,7 @@ jobs:
           GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
           FIRMEAPI_KEY: ${{ secrets.FIRMEAPI_KEY }}
         run: |
-          python -m moon.pipeline colectare --tiers "${{ vars.MOON_TIERS || 'A' }}"
+          python -m moon.pipeline colectare \
+            --tiers "${{ inputs.tiers || vars.MOON_TIERS || 'A' }}" \
+            --max-varsta "${{ inputs.max_varsta || 7 }}"
           python -m moon.pipeline sumar
