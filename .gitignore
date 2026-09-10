@@ -16,3 +16,13 @@ test/
 .DS_Store
 .agents/skills/developing-with-streamlit
 .claude/skills/developing-with-streamlit
+.wrangler/
+node_modules/
+_to_delete/
+_de_sters/
+_vechi/
+.env
+.env.*
+.dev.vars
+*.zip
+Claude outputs/

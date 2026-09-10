@@ -81,7 +81,7 @@ Tabele: `prospecti`, `blacklist`, `stare`, `jurnal`. Lista albă CAEN e în
   rămân cu textul vechi până rulezi `python -m moon.pipeline regenereaza`.
 - Butonul „Colectează acum" din dashboard face `workflow_dispatch` pe `colectare.yml`. Tokenul
   GitHub din worker (`GITHUB_TOKEN`, fine-grained, doar acest repo, Actions read/write)
-  **expiră pe 9 decembrie 2026** — după data aia butonul dă eroare 401 și trebuie făcut altul.
+  e **fără expirare**, ales de Felix. Dacă butonul dă 401, tokenul a fost revocat, nu expirat.
   Colectarea programată nu depinde de el.
 - Streamlit (`app.py`) mai merge în paralel, ca rezervă. Dacă adaugi coloane în `db.py`,
   migrarea rulează doar când pornește Python — worker-ul nu o poate face.
