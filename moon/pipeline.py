@@ -273,8 +273,10 @@ def main(argv=None) -> int:
     v.add_argument("--limita", type=int, default=500)
 
     sub.add_parser("sumar", help="cati prospecti sunt si in ce stadiu")
-    sub.add_parser("regenereaza",
-                   help="rescrie mesajele pre-generate pentru prospectii vechi")
+    rg = sub.add_parser("regenereaza",
+                        help="rescrie mesajele pre-generate pentru prospectii vechi")
+    rg.add_argument("--noi", action="store_true",
+                    help="rescrie si mesajele deja scrise ale prospectilor netrimisi (status nou/trimis)")
     sub.add_parser("statistici", help="rata de raspuns pe nisa, tier si varianta de mesaj")
 
     g = sub.add_parser("test-google", help="verifica cheia Google Places pe o firma reala")
@@ -298,15 +300,15 @@ def main(argv=None) -> int:
             randuri = db.prospecti(con, limita=100000)
             n = 0
             for r in randuri:
-                if r.get("mesaj_draft"):
+                if r.get("mesaj_draft") and not (a.noi and r.get("status") in ("nou", "trimis")):
                     continue
                 d = dict(r)
                 text, varianta = mesaj.compune(d, SEMN)
                 con.execute(
                     "UPDATE prospecti SET mesaj_draft=?, mesaj_fu3=?, mesaj_fu7=?, "
-                    "varianta_mesaj=COALESCE(varianta_mesaj,?) WHERE cui=?",
+                    "varianta_mesaj=CASE WHEN status='nou' THEN ? ELSE COALESCE(varianta_mesaj,?) END WHERE cui=?",
                     (text, mesaj.compune_followup(d, 3, SEMN),
-                     mesaj.compune_followup(d, 7, SEMN), varianta, r["cui"]))
+                     mesaj.compune_followup(d, 7, SEMN), varianta, varianta, r["cui"]))
                 n += 1
         print(f"{n} prospecti au primit mesajele pre-generate "
               f"(din {len(randuri)} in total).")

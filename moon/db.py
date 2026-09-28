@@ -54,7 +54,12 @@ CREATE TABLE IF NOT EXISTS prospecti (
     data_colectare     TEXT NOT NULL,
     data_trimitere     TEXT,
     data_raspuns       TEXT,
-    note               TEXT
+    note               TEXT,
+    canal              TEXT,
+    fu_trimise         INTEGER DEFAULT 0,
+    kit_vizite         INTEGER DEFAULT 0,
+    kit_deschis_la     TEXT,
+    kit_cerere_la      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS blacklist (

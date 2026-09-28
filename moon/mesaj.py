@@ -5,7 +5,8 @@ Principii:
   - afirmam DOAR ce am verificat: daca modulul places a intrebat Google, spunem
     "am cautat"; daca nu, formulam fara sa pretindem ca am verificat
   - patru scenarii, in functie de ce am gasit pe Google
-  - oferta de intrare gratuita (Google Business Profile), site-ul e pasul doi
+  - oferta de intrare e KITUL de start (link {{kit}}, generat automat de worker):
+    ghidul e gratis, executia e platita
   - variatie deterministica: fiecare prospect primeste alta combinatie de fraze,
     ca sa nu trimiti de 40 de ori acelasi text si sa fii marcat ca spam
   - fiecare mesaj isi returneaza si eticheta variantei, ca sa poti masura ulterior
@@ -147,31 +148,30 @@ _CONSTATARI = {
     ],
 }
 
+_KIT = [
+    "V-am pregătit gratuit kitul de start pe Google: pașii pentru fișă, gata completați pentru firma dumneavoastră, și o schiță de site. E aici: {{kit}}",
+    "Ca să apăreți repede pe Google, v-am făcut gratuit un kit de start: datele pentru fișă și o schiță de site. Îl găsiți aici: {{kit}}",
+    "V-am pregătit un kit gratuit, făcut pe firma dumneavoastră: fișa Google pas cu pas și o schiță de site: {{kit}}",
+]
+
+# Nu mai oferim munca gratis: dam linkul kitului (generat automat), iar executia e platita.
 _OFERTE = {
-    "nimic": [
-        "Vă configurez gratuit fișa de Google (Google Business Profile) — e ce aduce primele căutări.",
-        "Pot să vă fac gratuit fișa de Google Maps, e cel mai rapid lucru care aduce clienți.",
-        "Vă pot pune gratuit pe Google Maps, se rezolvă în 2-3 zile.",
-    ],
+    "nimic": _KIT,
     "fisa_slaba": [
-        "Vă optimizez gratuit fișa — poze, program, servicii, descriere. Durează 2-3 zile.",
-        "Pot să v-o duc la punct gratuit, ca să apăreți mai sus în căutările din zonă.",
-        "V-o completez gratuit, ca lumea din zonă să vă găsească mai ușor.",
+        "V-am pregătit gratuit un kit cu ce lipsește din fișă și o schiță de site. E aici: {{kit}}",
+        "Ca să apăreți mai sus pe hartă, v-am făcut gratuit un kit: descriere, servicii, postări și o schiță de site: {{kit}}",
     ],
     "are_tot": [
         "Vă fac gratuit o analiză a prezenței online — ce funcționează și ce vă scapă.",
         "Pot să vă trimit gratuit un audit scurt: ce v-ar aduce mai mulți clienți de aici încolo.",
     ],
-    "neverificat": [
-        "Vă configurez gratuit fișa de Google (Google Business Profile) — e ce aduce primele căutări.",
-        "Pot să vă fac gratuit fișa de Google Maps, e cel mai rapid lucru care aduce clienți.",
-    ],
+    "neverificat": _KIT,
 }
 
 _INCHIDERI = [
-    "Vă interesează?",
-    "Vreți să v-o fac?",
-    "Să v-o pregătesc?",
+    "Dacă n-aveți timp, ne ocupăm noi.",
+    "Dacă vreți, ne ocupăm noi de tot.",
+    "Orice întrebare, îmi scrieți aici.",
 ]
 
 _INCHIDERI_AUDIT = [
@@ -180,8 +180,8 @@ _INCHIDERI_AUDIT = [
 ]
 
 _FOLLOWUP_3 = [
-    "Bună ziua! Revin scurt legat de fișa de Google pentru {firma}. Rămâne valabil, durează 2-3 zile.",
-    "Bună ziua! Verific doar dacă ați apucat să vedeți mesajul despre fișa Google pentru {firma}.",
+    "Bună ziua! Revin scurt: kitul de start pentru {firma} e tot aici {kit}. Dacă vreți, ne ocupăm noi.",
+    "Bună ziua! Ați apucat să vedeți kitul pentru {firma}? {kit} Dacă n-aveți timp, îl facem noi.",
 ]
 
 _FOLLOWUP_7 = [
@@ -375,6 +375,10 @@ def compune(prospect: dict, semnatura: str = "Felix, THE MOON Agency",
 
     corp = constatare.format(problema=grup.problema)
     varianta = f"{scenariu}:d{i_d}c{i_c}o{i_o}i{i_i}"
+    if "{{kit}}" in oferta:
+        # linkul pe rand separat: WhatsApp il face clicabil si se vede clar
+        oferta = oferta.replace(" {{kit}}", "\n{{kit}}")
+        return f"{salut} {corp}\n\n{oferta}\n\n{inchidere}\n\n{semnatura}", varianta
     return f"{salut} {corp}\n\n{oferta} {inchidere}\n\n{semnatura}", varianta
 
 
@@ -388,7 +392,7 @@ def compune_followup(prospect: dict, zi: int, semnatura: str = "Felix, THE MOON 
     s = str(prospect.get("cui", firma))
     variante = _FOLLOWUP_3 if zi <= 4 else _FOLLOWUP_7
     # _alege da (text, indice) - fara [0] aici crapa tot tabul Follow-up
-    return f"{_alege(variante, s + str(zi))[0].format(firma=firma)}\n\n{semnatura}"
+    return f"{_alege(variante, s + str(zi))[0].format(firma=firma, kit='{{kit}}')}\n\n{semnatura}"
 
 
 def link_whatsapp(telefon: str, mesaj: str) -> str:
