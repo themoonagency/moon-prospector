@@ -211,6 +211,10 @@ def _coloane_din_schema() -> Dict[str, List[tuple]]:
 def _migreaza(con) -> List[str]:
     """Adaugă pe bazele existente orice coloană apărută între timp în SCHEMA."""
     adaugate = []
+    if con.pg:
+        # ALTER TABLE asteapta dupa orice conexiune ramasa „idle in transaction"
+        # (ex. vechiul Streamlit). Mai bine eroare clara dupa 10 s decat blocat la infinit.
+        con.execute("SET lock_timeout = '10s'")
     for tabel, coloane in _coloane_din_schema().items():
         existente = _coloane(con, tabel)
         if not existente:
