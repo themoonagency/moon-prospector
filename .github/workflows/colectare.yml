@@ -1,33 +1,56 @@
 name: Colectare firme noi
 
+# Logurile de aici sunt PUBLICE: colectarea tipareste doar cifre (fara nume, telefoane, CUI-uri).
+# Orice rulare, reusita sau nu, lasa un rand in tabela `jurnal` (dashboardul il arata).
+
 on:
   schedule:
-    - cron: "0 5 * * 1-5"   # 08:00 ora Romaniei, luni-vineri
+    - cron: "0 5 * * 1-5"   # 05:00 UTC luni-vineri = 08:00 ora Romaniei vara, 07:00 iarna
   workflow_dispatch:
+    # Gol = ce e salvat in panou (Setari -> Colectare). Completat = castiga pentru rularea asta.
     inputs:
       tiers:
-        description: "Tier-uri, despartite prin virgula (A, A,B, A,B,C)"
-        default: "A"
+        description: "Tier-uri, despartite prin virgula (A, A,B, A,B,C). Gol = din panou"
+        default: ""
       max_varsta:
-        description: "Vechime maxima a firmelor, in zile"
-        default: "7"
+        description: "Vechime maxima a firmelor, in zile (1-30). Gol = din panou"
+        default: ""
+      sursa:
+        description: "auto (lista ONRC, iar daca nu merge ANAF direct) sau anaf. Gol = din panou"
+        default: ""
+
+# Doua apasari pe „Colectează acum" nu ruleaza in paralel: a doua asteapta.
+concurrency:
+  group: colectare
+  cancel-in-progress: false
 
 jobs:
   colecteaza:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
+          cache: pip
+          cache-dependency-path: requirements-colectare.txt
+      - run: pip install -r requirements-colectare.txt
       - name: Colecteaza si verifica pe Google
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
           FIRMEAPI_KEY: ${{ secrets.FIRMEAPI_KEY }}
+          MOON_TIERS: ${{ vars.MOON_TIERS }}
+          # Valorile din inputs trec prin env, nu lipite in comanda (fara injectie de shell).
+          IN_TIERS: ${{ inputs.tiers }}
+          IN_VARSTA: ${{ inputs.max_varsta }}
+          IN_SURSA: ${{ inputs.sursa }}
         run: |
-          python -m moon.pipeline colectare \
-            --tiers "${{ inputs.tiers || vars.MOON_TIERS || 'A' }}" \
-            --max-varsta "${{ inputs.max_varsta || 7 }}"
+          set -eu
+          args=(colectare --din-setari)
+          if [ -n "${IN_TIERS:-}" ]; then args+=(--tiers "$IN_TIERS"); fi
+          if [ -n "${IN_VARSTA:-}" ]; then args+=(--max-varsta "$IN_VARSTA"); fi
+          if [ -n "${IN_SURSA:-}" ]; then args+=(--sursa "$IN_SURSA"); fi
+          python -m moon.pipeline "${args[@]}"
           python -m moon.pipeline sumar

@@ -57,38 +57,118 @@ def _to_firma(bloc: dict) -> Optional[Firma]:
     )
 
 
+class AnafIndisponibil(RuntimeError):
+    """ANAF nu raspunde (timeout, 5xx, 429, raspuns stricat) nici dupa reincercari."""
+
+    def __init__(self, motiv: str, http: Optional[int] = None):
+        super().__init__(motiv)
+        self.motiv = motiv
+        self.http = http
+
+
+class AnafRefuza(RuntimeError):
+    """ANAF a refuzat cererea (4xx): nu are rost sa reincercam, ceva s-a schimbat."""
+
+    def __init__(self, motiv: str, http: Optional[int] = None):
+        super().__init__(motiv)
+        self.motiv = motiv
+        self.http = http
+
+
+# Cat asteptam inainte de reincercarea 1, 2, 3 (secunde). Peste pauza obisnuita.
+ASTEPTARI = (2, 5, 10)
+
+
+def sesiune_noua() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({"Content-Type": "application/json", "User-Agent": UA})
+    return s
+
+
+def _citeste_raspuns(r) -> Optional[list]:
+    """Lista `found` din raspuns, sau None daca raspunsul nu e al ANAF (stricat)."""
+    try:
+        j = r.json()
+    except ValueError:
+        return None
+    if not isinstance(j, dict) or ("found" not in j and "notFound" not in j):
+        return None
+    gasite = j.get("found") or []
+    return gasite if isinstance(gasite, list) else None
+
+
+def interogheaza_lot(
+    lot: List[int],
+    zi: Optional[date] = None,
+    sesiune: Optional[requests.Session] = None,
+    pauza: float = 1.2,
+    timeout: int = 30,
+    incercari: int = 1 + len(ASTEPTARI),
+    dormi=time.sleep,
+) -> Dict[int, Firma]:
+    """Un singur lot (maxim 100 de CUI-uri) -> {cui: Firma}.
+
+    Dupa FIECARE cerere asteapta `pauza` (limita ANAF: 1 cerere/secunda).
+    Reincearca la timeout, conexiune cazuta, 429, 5xx si raspuns care nu e JSON-ul ANAF,
+    cu asteptari tot mai lungi (ASTEPTARI). La alt 4xx se opreste imediat (AnafRefuza).
+    Un 404 cu JSON-ul ANAF inseamna doar „niciun CUI gasit".
+    """
+    if len(lot) > 100:
+        raise ValueError("ANAF primeste maxim 100 de CUI-uri pe cerere")
+    zi = zi or date.today()
+    sesiune = sesiune or sesiune_noua()
+    payload = [{"cui": int(c), "data": zi.isoformat()} for c in lot]
+    motiv, http = "nu răspunde", None
+    for incercare in range(max(1, incercari)):
+        if incercare:
+            dormi(ASTEPTARI[min(incercare - 1, len(ASTEPTARI) - 1)])
+        try:
+            r = sesiune.post(URL, json=payload, timeout=timeout)
+        except requests.exceptions.Timeout:
+            motiv, http = "nu răspunde (timeout)", None
+            dormi(pauza)
+            continue
+        except requests.exceptions.RequestException:
+            motiv, http = "nu răspunde (conexiune căzută)", None
+            dormi(pauza)
+            continue
+        dormi(pauza)
+        cod = r.status_code
+        if cod == 429 or cod >= 500:
+            motiv, http = f"nu răspunde (HTTP {cod})", cod
+            continue
+        gasite = _citeste_raspuns(r)
+        if cod >= 400 and not (cod == 404 and gasite is not None):
+            if cod in (401, 403, 451):
+                raise AnafRefuza(f"blochează cererile noastre (HTTP {cod})", cod)
+            raise AnafRefuza(f"refuză cererea (HTTP {cod})", cod)
+        if gasite is None:
+            motiv, http = "dă un răspuns stricat", cod
+            continue
+        out: Dict[int, Firma] = {}
+        for bloc in gasite:
+            f = _to_firma(bloc) if isinstance(bloc, dict) else None
+            if f:
+                out[f.cui] = f
+        return out
+    raise AnafIndisponibil(motiv, http)
+
+
 def interogheaza(
     cuis: Iterable[int],
     zi: Optional[date] = None,
     pauza: float = 1.2,
     timeout: int = 30,
-    incercari: int = 3,
+    incercari: int = 1 + len(ASTEPTARI),
 ) -> Dict[int, Firma]:
     """Interogheaza ANAF in loturi de 100 si returneaza {cui: Firma}."""
     from .cui import loturi
 
-    zi = zi or date.today()
-    lista = list(cuis)
     rezultate: Dict[int, Firma] = {}
-    sesiune = requests.Session()
-    sesiune.headers.update({"Content-Type": "application/json", "User-Agent": UA})
-
-    for lot in loturi(lista, 100):
-        payload = [{"cui": c, "data": zi.isoformat()} for c in lot]
-        for incercare in range(incercari):
-            try:
-                r = sesiune.post(URL, json=payload, timeout=timeout)
-                r.raise_for_status()
-                for bloc in (r.json().get("found") or []):
-                    f = _to_firma(bloc)
-                    if f:
-                        rezultate[f.cui] = f
-                break
-            except Exception:
-                if incercare == incercari - 1:
-                    raise
-                time.sleep(2 ** incercare * pauza)
-        time.sleep(pauza)
+    sesiune = sesiune_noua()
+    for lot in loturi(list(cuis), 100):
+        rezultate.update(interogheaza_lot(lot, zi=zi, sesiune=sesiune, pauza=pauza,
+                                          timeout=timeout, incercari=incercari))
     return rezultate
 
 

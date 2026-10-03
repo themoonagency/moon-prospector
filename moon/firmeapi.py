@@ -136,7 +136,9 @@ def firme_noi(coduri_caen: Iterable[str], data_start: date, data_end: Optional[d
                 brut = interogheaza_brut(params)
             except Exception as e:
                 if verbose:
-                    verbose(f"     CAEN {cod}: {e}")
+                    # fara textul erorii (URL, raspuns): doar tipul si codul HTTP
+                    http = getattr(getattr(e, "response", None), "status_code", None)
+                    verbose(f"     CAEN {cod}: {type(e).__name__}" + (f" (HTTP {http})" if http else ""))
                 break
             randuri = _rezultate(brut)
             if not randuri:

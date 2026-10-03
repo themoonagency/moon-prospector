@@ -66,10 +66,30 @@ def parseaza(html: str) -> List[Intrare]:
     return [Intrare("", c, "", "") for c in cuis if c >= prag]
 
 
+class OnrcFaraFirme(RuntimeError):
+    """Pagina s-a descarcat, dar n-am gasit nicio firma pe ea (s-a schimbat structura)."""
+
+
 def descarca(timeout: int = 30) -> List[Intrare]:
     r = requests.get(URL, headers={"User-Agent": UA}, timeout=timeout)
     r.raise_for_status()
     return parseaza(r.text)
+
+
+def motiv(e: BaseException) -> str:
+    """De ce n-a mers lista, pe limba omului (pentru jurnal). Fara date despre firme."""
+    if isinstance(e, requests.exceptions.HTTPError):
+        cod = getattr(getattr(e, "response", None), "status_code", None)
+        if cod in (401, 403, 429):
+            return f"lista ONRC blochează GitHub ({cod})"
+        return f"lista ONRC a dat eroare (HTTP {cod})" if cod else "lista ONRC a dat eroare"
+    if isinstance(e, requests.exceptions.Timeout):
+        return "lista ONRC nu răspunde (timeout)"
+    if isinstance(e, requests.exceptions.RequestException):
+        return "lista ONRC nu răspunde"
+    if isinstance(e, OnrcFaraFirme):
+        return "lista ONRC și-a schimbat pagina (n-am găsit firme pe ea)"
+    return f"lista ONRC n-a mers ({type(e).__name__})"
 
 
 def interval_cui(intrari: List[Intrare]) -> Optional[Tuple[int, int]]:

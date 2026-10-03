@@ -1,0 +1,5 @@
+# Doar ce trebuie colectarii din GitHub Actions (fara Streamlit: instalare in cateva secunde).
+# Dashboardul local (app.py) foloseste requirements.txt.
+requests>=2.31
+python-dotenv>=1.0
+psycopg[binary]>=3.1

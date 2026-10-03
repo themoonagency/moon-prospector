@@ -46,6 +46,21 @@ def enumera(cui_min: int, cui_max: int) -> Iterator[int]:
             yield c
 
 
+def enumera_de_la(start: int) -> Iterator[int]:
+    """CUI-urile valide de la `start` in sus, fara capat (cine consuma se opreste).
+
+    Fiecare corp (CUI fara ultima cifra) are exact o cifra de control, deci
+    exista exact un CUI valid la fiecare 10 numere: 100 de CUI-uri valide
+    acopera mereu 1.000 de numere.
+    """
+    corp = max(1, int(start) // 10)
+    while True:
+        c = corp * 10 + cifra_control(corp)
+        if c >= start:
+            yield c
+        corp += 1
+
+
 def loturi(cuis: List[int], marime: int = 100) -> Iterator[List[int]]:
     """Imparte lista in loturi (ANAF accepta maxim 100 de CUI-uri per request)."""
     for i in range(0, len(cuis), marime):

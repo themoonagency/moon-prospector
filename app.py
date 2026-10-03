@@ -94,9 +94,15 @@ with st.sidebar:
             try:
                 j = colectare(tiers=",".join(tiers) or "A",
                               max_varsta=max_varsta, verbose=False)
-                st.success(f"{j['adaugate']} prospecți noi din {j['gasite']} firme "
+                rezumat = (f"{j['adaugate']} prospecți noi din {j['gasite']} firme "
                            f"· {j['verificate_google']} verificate pe Google "
                            f"· {j['sarite_duplicat']} sărite (același telefon)")
+                if (j.get("eroare") or "").startswith("Eroare"):
+                    st.error(f"{j['eroare']} ({rezumat})")
+                elif j.get("eroare"):
+                    st.warning(f"{rezumat}. {j['eroare']}")
+                else:
+                    st.success(rezumat)
             except Exception as e:
                 st.error(f"Colectarea a eșuat: {e}")
 

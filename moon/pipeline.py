@@ -1,9 +1,16 @@
-"""Orchestrarea colectarii: ONRC -> enumerare CUI -> ANAF -> filtru CAEN -> baza de date.
+"""Orchestrarea colectarii: frontiera CUI -> ANAF lot cu lot -> filtru CAEN -> baza de date.
+
+Lista ONRC (new.firme-on-line.ro) e doar un indiciu pentru capatul zilei: din
+30 sept 2026 blocheaza IP-urile GitHub (403), asa ca in modul `auto` cadem pe
+ANAF direct (moon/sondare.py). Firmele vin oricum TOATE de la ANAF.
 
 Rulare:
     python -m moon.pipeline colectare
     python -m moon.pipeline colectare --tiers A --max-varsta 3
+    python -m moon.pipeline colectare --din-setari      # setarile din panou
     python -m moon.pipeline sumar
+
+Logurile GitHub Actions sunt PUBLICE: la stdout doar cifre (fara nume, telefoane, CUI-uri).
 """
 from __future__ import annotations
 
@@ -11,16 +18,21 @@ import argparse
 import os
 import re
 import sys
-from datetime import date, datetime, timedelta
+import traceback
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from . import anaf, contacte, db, firmeapi, mesaj, onrc, places
+from . import anaf, contacte, db, firmeapi, mesaj, onrc, places, setari, sondare
 from .caen import ListaAlba
-from .cui import enumera
+from .cui import valid
 
-# Cat de departe sub cel mai mic CUI vazut mai cautam, ca sa nu ratam
-# inregistrarile care nu au aparut inca pe pagina publica.
+# Doar la prima rulare (fara `ultim_cui` in baza): cat de departe sub cel mai
+# mic CUI de pe pagina ONRC incepem.
 MARJA_INAPOI = 400
+
+# Limita ANAF e 1 cerere/secunda; sub atat nu coboram, orice ar zice --pauza.
+PAUZA_MIN = 1.0
+JURNAL_MAX = 500
 
 # Semnatura ramane substituent in baza de date; interfata o inlocuieste
 # la afisare, ca schimbarea ei sa nu ceara regenerarea mesajelor.
@@ -101,8 +113,7 @@ def _din_firmeapi(f) -> anaf.Firma:
 def _descopera_firmeapi(lista, tiers: str, max_varsta: int, log) -> dict:
     """Descoperire prin API-ul firmeapi.ro: filtrează pe CAEN din start."""
     from datetime import date as _date
-    coduri = [n.cod for n in lista._nise.values()
-              if n.tier in {t.strip().upper() for t in tiers.split(",") if t.strip()}]
+    coduri = lista.coduri(tiers)
     start = _date.today() - timedelta(days=max_varsta)
     log(f"1/3  firmeapi.ro: {len(coduri)} coduri CAEN, "
         f"{start.isoformat()} -> {_date.today().isoformat()}")
@@ -111,77 +122,331 @@ def _descopera_firmeapi(lista, tiers: str, max_varsta: int, log) -> dict:
     return {c: _din_firmeapi(f) for c, f in firme.items()}
 
 
-def colectare(tiers: str = "A,B", max_varsta: int = 7, pauza: float = 1.2,
-              doar_mobil: bool = True, verifica_google: bool = True,
-              sursa: str = "auto", verbose: bool = True) -> dict:
-    lista = ListaAlba()
-    db.initializeaza()
-    jurnal = {"interogate": 0, "gasite": 0, "in_lista_alba": 0, "cu_mobil": 0,
-              "verificate_google": 0, "sarite_duplicat": 0, "sarite_nefirma": 0,
-              "adaugate": 0}
+class Probleme:
+    """Ce a mers prost intr-o rulare, pe limba omului, pentru coloana `jurnal.eroare`.
+
+    Conventie (o citesc dashboardul si alertele): textul incepe cu „Eroare: " cand
+    rularea a esuat sau a ramas la jumatate si cu „Atenție: " cand a mers, dar e
+    ceva de stiut (ex. a cazut pe ANAF direct). Fara probleme: NULL.
+    """
+
+    def __init__(self):
+        self.erori, self.avert = [], []
+
+    def eroare(self, m: str) -> None:
+        if m not in self.erori:
+            self.erori.append(m)
+
+    def atentie(self, m: str) -> None:
+        if m not in self.avert:
+            self.avert.append(m)
+
+    def text(self) -> Optional[str]:
+        if self.erori:
+            t = "Eroare: " + " · ".join(self.erori + self.avert)
+        elif self.avert:
+            t = "Atenție: " + " · ".join(self.avert)
+        else:
+            return None
+        return t if len(t) <= JURNAL_MAX else t[:JURNAL_MAX - 1] + "…"
+
+
+def _acum() -> str:
+    """Ora UTC, ISO fara Z, la secunda (conventia bazei)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _int(x) -> Optional[int]:
+    try:
+        v = int(str(x).strip())
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _mesaj_anaf(e: Optional[BaseException]) -> str:
+    if isinstance(e, anaf.AnafRefuza):
+        if e.http in (401, 403, 451):
+            return f"ANAF {e.motiv}"
+        return f"ANAF {e.motiv} — poate s-a schimbat serviciul lor"
+    if isinstance(e, anaf.AnafIndisponibil):
+        return f"ANAF {e.motiv}"
+    return f"ANAF n-a mers ({type(e).__name__})"
+
+
+def _e_de_baza(e: BaseException) -> bool:
+    return (type(e).__module__ or "").startswith(("psycopg", "sqlite3"))
+
+
+_RE_COD_BAZA = re.compile(r"^[A-Z0-9_]{1,40}$")
+
+
+def _cod_baza(e: BaseException) -> Optional[str]:
+    """sqlstate-ul Postgres (ex. 23502) sau numele codului SQLite (ex. SQLITE_CONSTRAINT_NOTNULL).
+
+    NICIODATA textul erorii: la Postgres el are `DETAIL: Failing row contains (…, denumire, adresa …)`.
+    """
+    for camp in ("sqlstate", "pgcode", "sqlite_errorname", "sqlite_errorcode"):
+        v = getattr(e, camp, None)
+        if v is not None and _RE_COD_BAZA.match(str(v)):
+            return str(v)
+    return None
+
+
+def _eroare_de_baza(e: BaseException) -> str:
+    """„NotNullViolation, cod 23502" — doar tipul si codul, pentru stdout si `jurnal.eroare`."""
+    cod = _cod_baza(e)
+    return type(e).__name__ + (f", cod {cod}" if cod else "")
+
+
+def _mesaj_neprevazut(e: BaseException) -> str:
+    if isinstance(e, KeyboardInterrupt):
+        return "colectarea a fost oprită înainte de final"
+    if _e_de_baza(e):
+        return f"baza de date a dat eroare ({_eroare_de_baza(e)})"
+    return f"eroare neprevăzută ({type(e).__name__}) — detaliile sunt în GitHub Actions"
+
+
+_RE_ASCUNDE = [(re.compile(r"\d{5,}"), "…"),
+               (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "…@…"),
+               (re.compile(r"postgres\.[a-z0-9]+", re.I), "postgres.…")]
+
+
+def _ascunde(text: str) -> str:
+    """Logurile din Actions sunt publice: scoatem CUI-uri, telefoane, emailuri, userul bazei."""
+    for rx, inlocuire in _RE_ASCUNDE:
+        text = rx.sub(inlocuire, text)
+    return text
+
+
+_MARI = "A-ZĂÂÎȘŞȚŢ"
+_RE_STRICT = [
+    (re.compile(r"\?\S*"), "?…"),                                       # parametrii din URL-uri
+    (re.compile(r"'[^']*'|\"[^\"]*\"|„[^”\"]*[”\"]|«[^»]*»"), "…"),    # valori intre ghilimele
+    (re.compile(r"\([^()]*\)"), "(…)"),                                  # randuri / tupluri intre paranteze
+    (re.compile(r"\d{3,}"), "…"),                                        # CUI, telefon, cod postal, numar
+    (re.compile(rf"\b[{_MARI}][{_MARI}0-9.&-]*(?:[ ,]+[{_MARI}0-9][{_MARI}0-9.&-]*)+"), "…"),  # FIRMA EXEMPLU SRL, STR. LUNGA
+]
+
+
+def _ascunde_strict(text: str, maxim: int = 200) -> str:
+    """Mesajul unei exceptii pentru logurile PUBLICE: doar primul rand (fara DETAIL / CONTEXT),
+    fara valori intre ghilimele sau paranteze, fara cifre de 3+, fara siruri de cuvinte cu majuscule."""
+    randuri = str(text or "").strip().splitlines()
+    t = _ascunde(randuri[0] if randuri else "")
+    for rx, inlocuire in _RE_STRICT:
+        t = rx.sub(inlocuire, t)
+    return t[:maxim]
+
+
+def _unde(e: BaseException) -> str:
+    """Unde a picat: fisier:rand in functie, cadru cu cadru (fara randurile de cod si fara valori)."""
+    return "\n".join(f"  {os.path.basename(c.filename)}:{c.lineno} in {c.name}"
+                     for c in traceback.extract_tb(e.__traceback__))
+
+
+def _descrie_exceptia(e: BaseException) -> str:
+    """Ce tiparim in Actions despre o exceptie: la baza doar tipul si codul, altfel mesajul mascat strict."""
+    if _e_de_baza(e):
+        return f"baza de date: {_eroare_de_baza(e)}"
+    m = _ascunde_strict(str(e))
+    return type(e).__name__ + (f": {m}" if m else "")
+
+
+def colectare(tiers: Optional[str] = None, max_varsta: Optional[int] = None,
+              pauza: float = 1.2, doar_mobil: bool = True, verifica_google: bool = True,
+              sursa: Optional[str] = None, din_setari: bool = False,
+              verbose: bool = True) -> dict:
+    """Colecteaza firmele noi. Scrie MEREU un rand in `jurnal`, si cand ceva pica.
+
+    tiers / max_varsta / sursa: None = din panou (cu din_setari), apoi din mediu, apoi implicit.
+    Erorile asteptate (ANAF cazut, ONRC blocat) nu arunca: ajung in `rez["eroare"]`.
+    Cele neprevazute se scriu in jurnal si apoi se arunca mai departe.
+    """
+    rez = {"interogate": 0, "gasite": 0, "in_lista_alba": 0, "cu_mobil": 0,
+           "verificate_google": 0, "sarite_duplicat": 0, "sarite_nefirma": 0,
+           "adaugate": 0, "cui_min": None, "cui_max": None, "eroare": None}
+    pr = Probleme()
+    pornit = _acum()
 
     def log(*a):
         if verbose:
             print(*a, flush=True)
 
-    if sursa == "auto":
-        sursa = "firmeapi" if firmeapi.activ() else "onrc"
+    try:
+        _colecteaza(rez, pr, log, tiers=tiers, max_varsta=max_varsta, pauza=pauza,
+                    doar_mobil=doar_mobil, verifica_google=verifica_google,
+                    sursa=sursa, din_setari=din_setari)
+    except BaseException as e:
+        pr.eroare(_mesaj_neprevazut(e))
+        raise
+    finally:
+        rez["eroare"] = pr.text()
+        try:
+            with db.conexiune() as con:
+                db.scrie_jurnal(con, {**rez, "pornit_la": pornit})
+        except Exception as e:      # noqa: BLE001 - baza cazuta: macar sa se vada in Actions
+            log(f"Nu am putut scrie nici in jurnal ({type(e).__name__}).")
+        if rez["eroare"]:
+            log(rez["eroare"])
+    return rez
 
-    cui_min = cui_max = None
+
+def _colecteaza(rez: dict, pr: Probleme, log, *, tiers, max_varsta, pauza, doar_mobil,
+                verifica_google, sursa, din_setari) -> None:
+    lista = ListaAlba()
+    db.initializeaza()
+    max_db = None
+    with db.conexiune() as con:
+        brut_setari = db.get_stare(con, "colectare_setari") if din_setari else None
+        brut_override = db.get_stare(con, "caen_override")
+        frontiera = _int(db.get_stare(con, "ultim_cui"))
+        if not frontiera:
+            max_db = db.max_cui_prospecti(con)
+
+    panou = None
+    if din_setari:
+        x = setari.din_json(brut_setari)
+        panou, gresite = setari.curata_setari(x)
+        if gresite or (brut_setari and x is None):
+            pr.atentie("setările de colectare din panou au valori greșite — "
+                       "am folosit valorile implicite pentru ele")
+    s, gresite_explicit = setari.rezolva({"tiers": tiers, "max_varsta": max_varsta, "sursa": sursa},
+                                         panou, os.environ)
+    if gresite_explicit:
+        pr.atentie("am ignorat valori greșite date la pornire (" + ", ".join(gresite_explicit) + ")")
+    tiers, max_varsta, sursa = s["tiers"], s["max_varsta"], s["sursa"]
+    x = setari.din_json(brut_override)
+    override, sarite = setari.curata_override(x)
+    if sarite or (brut_override and x is None):
+        pr.atentie("unele coduri CAEN din panou au valori greșite și au fost sărite")
+    lista.aplica_override(override)
+    pauza = max(PAUZA_MIN, float(pauza or 0))
+    log(f"Setari: tier {tiers}, vechime maxima {max_varsta} zile, sursa {sursa}"
+        + (f", {len(override)} coduri CAEN schimbate din panou" if override else ""))
+
     if sursa == "firmeapi":
+        # Doar local (din GitHub Actions / panou nu se poate alege). Si aici nimic de la frontiera in jos:
+        # ce a sters Felix din panou nu revine. Frontiera nu se muta (firmeapi nu vede toate CUI-urile).
+        prag = frontiera or max_db
         firme = _descopera_firmeapi(lista, tiers, max_varsta, log)
-        jurnal["gasite"] = len(firme)
+        sub = sum(1 for c in firme if prag and c <= prag)
+        if sub:
+            log(f"     {sub} firme sub ultimul CUI stiut, sarite")
+        rez["gasite"] = len(firme) - sub
+        _salveaza(firme, prag, None, lista, rez, log, tiers=tiers, max_varsta=max_varsta,
+                  doar_mobil=doar_mobil, verifica_google=verifica_google)
+        return
+
+    # 1. Capatul zilei din lista ONRC (doar indiciu; firmele vin oricum de la ANAF).
+    indiciu = None
+    if sursa in ("auto", "onrc"):
+        log("1/4  Citesc lista ONRC de firme noi...")
+        try:
+            intrari = onrc.descarca()
+            indiciu = onrc.interval_cui(intrari)
+            if not indiciu:
+                raise onrc.OnrcFaraFirme()
+            log(f"     {len(intrari)} firme pe pagina")
+        except Exception as e:      # noqa: BLE001 - orice problema cu lista -> ANAF direct
+            m = onrc.motiv(e)
+            if sursa == "onrc":
+                pr.eroare(m)
+                log(f"     {m}")
+                return
+            pr.atentie(m + " — am folosit ANAF direct")
+            log(f"     {m} — trec pe ANAF direct")
     else:
-        log("1/4  Citesc lista publica de firme noi...")
-        intrari = onrc.descarca()
-        interval = onrc.interval_cui(intrari)
-        if not interval:
-            raise RuntimeError("Nu am gasit nicio firma pe pagina sursa.")
-        cui_min_pagina, cui_max = interval
-        log(f"     {len(intrari)} firme pe pagina, CUI {cui_min_pagina}-{cui_max}")
+        log("1/4  Sursa: doar ANAF (fara lista ONRC)")
 
-        with db.conexiune() as con:
-            vazut = db.get_stare(con, "ultim_cui")
-        cui_min = max(int(vazut) + 1, cui_min_pagina - MARJA_INAPOI) if vazut \
-            else cui_min_pagina - MARJA_INAPOI
+    # 2. De unde pornim: de la frontiera de data trecuta, inclusiv (ea e proba ca ANAF
+    #    raspunde normal). Sub ea nu adaugam nimic: ce s-a sters din panou nu revine.
+    proba = None
+    if frontiera:
+        start = proba = frontiera
+    elif indiciu:
+        start = max(1, indiciu[0] - MARJA_INAPOI)
+    elif max_db:
+        start = proba = frontiera = max_db
+    else:
+        pr.eroare("nu știu de unde să încep: lipsește ultimul CUI și lista ONRC nu merge")
+        return
+    proba = proba if proba and valid(proba) else None
+    capat_onrc = indiciu[1] if indiciu and indiciu[1] >= start else None
 
-        candidati = list(enumera(cui_min, cui_max))
-        jurnal["interogate"] = len(candidati)
-        log(f"2/4  {len(candidati)} CUI-uri valide de verificat "
-            f"({len(candidati) - len(intrari)} peste ce arata pagina)")
+    log(f"2/4  Intreb ANAF lot cu lot ({sondare.MARIME_LOT} CUI-uri pe cerere; ma opresc dupa "
+        f"{sondare.K_GOALE} loturi goale la rand, maxim {sondare.PLAFON_LOTURI} cereri)")
+    sesiune = anaf.sesiune_noua()
+    sj = sondare.sondeaza(start, lambda lot: anaf.interogheaza_lot(lot, sesiune=sesiune,
+                                                                    pauza=pauza),
+                          k=sondare.K_GOALE, plafon=sondare.PLAFON_LOTURI,
+                          nu_te_opri_sub=capat_onrc, log=log)
+    rez["cui_min"], rez["cui_max"], rez["interogate"] = sj.cui_min, sj.cui_max, sj.interogate
+    noi = [c for c in sj.firme if not frontiera or c > frontiera]
+    rez["gasite"] = len(noi)
+    log(f"3/4  {sj.loturi} cereri ANAF, {sj.interogate} CUI-uri, {len(noi)} firme noi")
 
-        log("3/4  Interoghez ANAF...")
-        firme = anaf.interogheaza(candidati, pauza=pauza)
-        jurnal["gasite"] = len(firme)
-        log(f"     {len(firme)} firme existente in ANAF")
+    if sj.motiv == "eroare":
+        m = _mesaj_anaf(sj.eroare)
+        if sj.loturi == 0:
+            pr.eroare(m + " — n-am putut colecta nimic; reîncerc la rularea următoare")
+            return
+        else:
+            pr.eroare(f"{m} după {sj.loturi} cereri — am salvat ce am găsit; "
+                      "continui de aici la rularea următoare")
+    elif sj.motiv == "plafon":
+        pr.atentie(f"am ajuns la plafonul de {sondare.PLAFON_LOTURI} de cereri ANAF — "
+                   "continui de aici la rularea următoare")
+    if proba and sj.loturi and proba not in sj.firme:
+        pr.atentie("ANAF nu mai găsește ultima firmă știută — verifică dacă s-a schimbat ceva la ANAF")
+    if sj.motiv == "capat" and not noi:
+        pr.atentie("nicio firmă nouă la ANAF de la rularea trecută")
 
+    _salveaza(sj.firme, frontiera, sj.ultim_gasit, lista, rez, log, tiers=tiers,
+              max_varsta=max_varsta, doar_mobil=doar_mobil, verifica_google=verifica_google)
+
+
+def _salveaza(firme: dict, frontiera: Optional[int], noua_frontiera: Optional[int],
+              lista: ListaAlba, jurnal: dict, log, *, tiers: str, max_varsta: int,
+              doar_mobil: bool, verifica_google: bool) -> None:
+    """Filtreaza si salveaza; muta frontiera in aceeasi tranzactie (totul sau nimic).
+
+    Doar firmele de peste frontiera: frontiera insasi (proba) si ce e sub ea au
+    fost tratate data trecuta, iar ce a sters Felix din panou nu trebuie sa revina.
+    """
     cu_google = verifica_google and bool(places.cheie())
     log("4/4  Filtrez si salvez..." + ("" if cu_google else
         "  (fara verificare Google - lipseste GOOGLE_PLACES_API_KEY)"))
-    acum = datetime.now().isoformat(timespec="seconds")
+    acum = _acum()
     with db.conexiune() as con:
         for cui, f in sorted(firme.items()):
+            if frontiera and cui <= frontiera:
+                continue
+
+            def numara(cheie: str) -> None:
+                jurnal[cheie] = jurnal.get(cheie, 0) + 1
+
             if not f.activa or _prea_veche(f.data_inregistrare, max_varsta):
                 continue
             if _de_ignorat(f.denumire):
-                jurnal["sarite_nefirma"] = jurnal.get("sarite_nefirma", 0) + 1
+                numara("sarite_nefirma")
                 continue
             nisa = lista.accepta(f.caen, tiers)
             if not nisa:
                 continue
-            jurnal["in_lista_alba"] += 1
+            numara("in_lista_alba")
 
             tel = anaf.normalizeaza_telefon(f.telefon)
             mobil = anaf.este_mobil(tel)
             if mobil:
-                jurnal["cu_mobil"] += 1
+                numara("cu_mobil")
             if doar_mobil and not mobil:
                 continue
             if db.e_blacklistat(con, tel):
                 continue
             # Acelasi administrator poate deschide mai multe firme cu acelasi numar.
             if db.telefon_deja_folosit(con, tel):
-                jurnal["sarite_duplicat"] += 1
+                numara("sarite_duplicat")
                 continue
 
             # firmeapi da judetul si localitatea direct; ANAF nu, deci le deducem
@@ -233,24 +498,16 @@ def colectare(tiers: str = "A,B", max_varsta: int = 7, pauza: float = 1.2,
             rand["mesaj_fu3"] = mesaj.compune_followup(rand, 3, SEMN)
             rand["mesaj_fu7"] = mesaj.compune_followup(rand, 7, SEMN)
 
-            nou = db.upsert_prospect(con, rand)
-            jurnal["adaugate"] += int(nou)
+            nou_in_baza = db.upsert_prospect(con, rand)
+            jurnal["adaugate"] += int(nou_in_baza)
 
-        if cui_max:
-            db.set_stare(con, "ultim_cui", cui_max)
-        con.execute(
-            "INSERT INTO jurnal(pornit_la,cui_min,cui_max,interogate,gasite,"
-            "in_lista_alba,cu_mobil,verificate_google,adaugate) VALUES(?,?,?,?,?,?,?,?,?)",
-            (acum, cui_min, cui_max, jurnal["interogate"], jurnal["gasite"],
-             jurnal["in_lista_alba"], jurnal["cu_mobil"],
-             jurnal["verificate_google"], jurnal["adaugate"]),
-        )
+        if noua_frontiera and (not frontiera or noua_frontiera > frontiera):
+            db.set_stare(con, "ultim_cui", noua_frontiera)
 
     log(f"\nGata: {jurnal['in_lista_alba']} in lista alba, {jurnal['cu_mobil']} cu mobil, "
         f"{jurnal['sarite_duplicat']} sarite (acelasi telefon), "
         f"{jurnal['verificate_google']} verificate pe Google, "
         f"{jurnal['adaugate']} adaugate ca prospecti noi.")
-    return jurnal
 
 
 def main(argv=None) -> int:
@@ -258,15 +515,22 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("colectare", help="colecteaza firmele noi de azi")
-    c.add_argument("--tiers", default=os.getenv("MOON_TIERS", "A,B"))
-    c.add_argument("--max-varsta", type=int, default=int(os.getenv("MOON_MAX_AGE_DAYS", 7)))
+    c.add_argument("--tiers", default=None,
+                   help="A, A,B, A,B,C (lipsa = panou cu --din-setari, apoi MOON_TIERS, apoi A,B)")
+    c.add_argument("--max-varsta", default=None,
+                   help="vechimea maxima in zile (lipsa = panou / MOON_MAX_AGE_DAYS / 7)")
     c.add_argument("--pauza", type=float, default=float(os.getenv("MOON_ANAF_SLEEP", 1.2)))
     c.add_argument("--toate-telefoanele", action="store_true",
                    help="pastreaza si fixele, nu doar mobilele")
     c.add_argument("--fara-google", action="store_true",
                    help="nu verifica prezenta pe Google (economiseste apeluri Places)")
-    c.add_argument("--sursa", choices=("auto", "onrc", "firmeapi"), default="auto",
-                   help="de unde vin firmele noi (auto = firmeapi daca ai cheie)")
+    c.add_argument("--sursa", default=None,
+                   help="auto = lista ONRC, iar daca nu merge ANAF direct; anaf = doar ANAF; "
+                        "onrc = doar cu lista ONRC; firmeapi = API-ul platit (onrc si firmeapi doar "
+                        "local; in GitHub Actions se ignora). O valoare gresita se ignora, cu avertisment in jurnal")
+    c.add_argument("--din-setari", action="store_true",
+                   help="ia tier-urile, vechimea si sursa din panou (stare.colectare_setari); "
+                        "ce dai explicit in linia de comanda castiga")
 
     v = sub.add_parser("verifica",
                        help="cauta pe Google prospectii deja colectati, dar neverificati")
@@ -288,9 +552,16 @@ def main(argv=None) -> int:
 
     a = p.parse_args(argv)
     if a.cmd == "colectare":
-        colectare(tiers=a.tiers, max_varsta=a.max_varsta, pauza=a.pauza,
-                  doar_mobil=not a.toate_telefoanele,
-                  verifica_google=not a.fara_google, sursa=a.sursa)
+        try:
+            rez = colectare(tiers=a.tiers, max_varsta=a.max_varsta, pauza=a.pauza,
+                            doar_mobil=not a.toate_telefoanele,
+                            verifica_google=not a.fara_google, sursa=a.sursa,
+                            din_setari=a.din_setari)
+        except BaseException as e:      # noqa: BLE001 - jurnalul e deja scris
+            print(f"Colectarea a esuat: {_descrie_exceptia(e)}", file=sys.stderr, flush=True)
+            print(_unde(e), file=sys.stderr, flush=True)
+            return 1
+        return 1 if (rez.get("eroare") or "").startswith("Eroare") else 0
     elif a.cmd == "regenereaza":
         # Prospectii adunati inainte de mutarea dashboardului pe Cloudflare
         # nu au mesajele scrise in baza. Le scriem acum, o singura data.

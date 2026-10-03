@@ -263,6 +263,21 @@ def telefon_deja_folosit(con, telefon: Optional[str]) -> bool:
     return con.execute("SELECT 1 FROM prospecti WHERE telefon=?", (telefon,)).fetchone() is not None
 
 
+def max_cui_prospecti(con) -> Optional[int]:
+    """Cel mai mare CUI salvat vreodata - punct de plecare daca lipseste `ultim_cui`."""
+    r = con.execute("SELECT MAX(cui) AS m FROM prospecti").fetchone()
+    m = r["m"] if r else None
+    return int(m) if m else None
+
+
+def scrie_jurnal(con, rand: Dict[str, Any]) -> None:
+    """Un rand in `jurnal` pentru fiecare rulare, reusita sau nu (dashboardul il citeste)."""
+    coloane = ("pornit_la", "cui_min", "cui_max", "interogate", "gasite", "in_lista_alba",
+               "cu_mobil", "verificate_google", "adaugate", "eroare")
+    con.execute(f"INSERT INTO jurnal({','.join(coloane)}) VALUES({','.join('?' for _ in coloane)})",
+                [rand.get(c) for c in coloane])
+
+
 def upsert_prospect(con, p: Dict[str, Any]) -> bool:
     if con.execute("SELECT 1 FROM prospecti WHERE cui=?", (p["cui"],)).fetchone():
         return False
